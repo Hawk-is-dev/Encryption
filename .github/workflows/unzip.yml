@@ -1,0 +1,116 @@
+
+name: Extract ZIP into Repository
+
+on:
+  push:
+    paths:
+      - "*.zip"
+      - "**/*.zip"
+  workflow_dispatch:
+    inputs:
+      zip_path:
+        description: "ZIP file path"
+        required: true
+        default: "bot.zip"
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find ZIP File
+        id: findzip
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ZIP="${{ inputs.zip_path }}"
+          else
+            ZIP=$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | grep -E '\.zip$' | head -n 1)
+          fi
+
+          if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
+            echo "ZIP file not found!"
+            exit 1
+          fi
+
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: Extract ZIP
+        env:
+          ZIP: ${{ steps.findzip.outputs.zip }}
+        run: |
+          python - <<'PY'
+          import os
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          root = Path.cwd().resolve()
+          archive = Path(os.environ["ZIP"])
+
+          excluded = {
+              ".git", ".github", ".env", ".env.local",
+              ".env.production", "env.txt", "__pycache__"
+          }
+
+          count = 0
+
+          with zipfile.ZipFile(archive) as z:
+              for item in z.infolist():
+                  if item.is_dir():
+                      continue
+
+                  name = item.filename.replace("\\", "/")
+                  path = PurePosixPath(name)
+
+                  if path.is_absolute() or ".." in path.parts:
+                      continue
+
+                  if any(part in excluded for part in path.parts):
+                      continue
+
+                  if path.suffix.lower() in {
+                      ".zip", ".db", ".sqlite", ".sqlite3",
+                      ".session", ".log"
+                  }:
+                      continue
+
+                  target = (root / Path(*path.parts)).resolve()
+
+                  if root not in target.parents:
+                      continue
+
+                  target.parent.mkdir(parents=True, exist_ok=True)
+
+                  with z.open(item) as src:
+                      target.write_bytes(src.read())
+
+                  count += 1
+                  print("Extracted:", name)
+
+          print("Total files:", count)
+
+          if count == 0:
+              raise SystemExit("No eligible files extracted")
+          PY
+
+      - name: Commit Changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Extract ZIP files"
+            git push
+          else
+            echo "No changes to commit"
+          fi
