@@ -6,12 +6,13 @@ on:
     paths:
       - "*.zip"
       - "**/*.zip"
+
   workflow_dispatch:
     inputs:
       zip_path:
-        description: "ZIP file path"
+        description: "ZIP file name"
         required: true
-        default: "bot.zip"
+        default: "railway-fernet-key-generator.zip"
 
 permissions:
   contents: write
@@ -26,7 +27,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Find ZIP File
+      - name: Find ZIP
         id: findzip
         shell: bash
         run: |
@@ -37,13 +38,13 @@ jobs:
           fi
 
           if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
-            echo "ZIP file not found!"
+            echo "ZIP not found: $ZIP"
             exit 1
           fi
 
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
-      - name: Extract ZIP
+      - name: Extract Generator Files
         env:
           ZIP: ${{ steps.findzip.outputs.zip }}
         run: |
@@ -56,33 +57,54 @@ jobs:
           archive = Path(os.environ["ZIP"])
 
           excluded = {
-              ".git", ".github", ".env", ".env.local",
-              ".env.production", "env.txt", "__pycache__"
+              ".git", ".github", "__pycache__",
+              ".env", ".env.local", ".env.production",
+              "env.txt"
           }
 
-          count = 0
+          blocked = {
+              ".session", ".db", ".sqlite",
+              ".sqlite3", ".log"
+          }
 
           with zipfile.ZipFile(archive) as z:
-              for item in z.infolist():
-                  if item.is_dir():
-                      continue
+              files = [i for i in z.infolist() if not i.is_dir()]
 
-                  name = item.filename.replace("\\", "/")
-                  path = PurePosixPath(name)
+              # Remove one common wrapper directory if present.
+              paths = [
+                  PurePosixPath(i.filename.replace("\\", "/"))
+                  for i in files
+              ]
 
+              first_parts = {p.parts[0] for p in paths if p.parts}
+              strip_root = (
+                  len(first_parts) == 1
+                  and all(len(p.parts) > 1 for p in paths)
+              )
+
+              count = 0
+
+              for item, path in zip(files, paths):
                   if path.is_absolute() or ".." in path.parts:
                       continue
 
-                  if any(part in excluded for part in path.parts):
+                  parts = path.parts[1:] if strip_root else path.parts
+
+                  if not parts:
                       continue
 
-                  if path.suffix.lower() in {
-                      ".zip", ".db", ".sqlite", ".sqlite3",
-                      ".session", ".log"
-                  }:
+                  if any(part in excluded for part in parts):
+                      print("Skipped:", item.filename)
                       continue
 
-                  target = (root / Path(*path.parts)).resolve()
+                  if PurePosixPath(parts[-1]).suffix.lower() in blocked:
+                      print("Skipped:", item.filename)
+                      continue
+
+                  if parts[-1].lower().endswith(".zip"):
+                      continue
+
+                  target = (root / Path(*parts)).resolve()
 
                   if root not in target.parents:
                       continue
@@ -92,24 +114,24 @@ jobs:
                   with z.open(item) as src:
                       target.write_bytes(src.read())
 
+                  print("Extracted:", target.relative_to(root))
                   count += 1
-                  print("Extracted:", name)
 
-          print("Total files:", count)
+          print("Total extracted:", count)
 
           if count == 0:
-              raise SystemExit("No eligible files extracted")
+              raise SystemExit("No eligible files found.")
           PY
 
-      - name: Commit Changes
+      - name: Commit Extracted Files
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add -
+          git add -A
 
           if ! git diff --cached --quiet; then
-            git commit -m "Extract ZIP files"
+            git commit -m "Extract Railway key generator"
             git push
           else
             echo "No changes to commit"
